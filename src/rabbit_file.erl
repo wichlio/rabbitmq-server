@@ -173,7 +173,10 @@ with_synced_copy(Path, Modes, Fun) ->
                               try
                                   Result = Fun(Hdl),
                                   ok = prim_file:sync(Hdl),
-                                  ok = prim_file:rename(Bak, Path),
+                                  prim_file:write_file(Path, <<>>),
+                                  {ok, Data} = prim_file:read_file(Bak),
+                                  ok = prim_file:write_file(Path, Data),
+                                  ok = prim_file:delete(Bak),
                                   Result
                               after
                                   prim_file:close(Hdl)
