@@ -49,10 +49,15 @@ handle_info(check_vhost, VHost) ->
     case rabbit_vhost:exists(VHost) of
         true  -> {noreply, VHost};
         false ->
-            rabbit_log:error(" Vhost \"~p\" is gone."
-                             " Stopping message store supervisor.",
-                             [VHost]),
-            {stop, normal, VHost}
+            rabbit_log:warning("Virtual host '~s' is gone."
+                               "Stopping message store supervisor.",
+                               [VHost]),
+            %% Stop vhost supervisor in one-off process, to avoid deadlocks.
+            spawn(
+                fun() ->
+                    rabbit_vhost_sup_sup:stop_and_delete_vhost(VHost)
+                end),
+            {noreply, VHost}
     end;
 handle_info(_, VHost) ->
     {noreply, VHost}.
