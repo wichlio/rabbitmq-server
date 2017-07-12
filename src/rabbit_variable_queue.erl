@@ -810,13 +810,18 @@ is_empty(State) -> 0 == len(State).
 depth(State) ->
     len(State) + count_pending_acks(State).
 
+% TODO HACK this completely ignores incoming DurationTarget
+% and assumes that we always want to reduce memory use
+set_ram_duration_target(DurationTarget, State = #vqstate { mode = lazy, target_ram_count = TargetRamCount }) ->
+    io:format("set_ram_duration_target Mode ~p DurationTarget ~p TargetRamCount ~p~n", [lazy, DurationTarget, TargetRamCount]),
+    maybe_reduce_memory_use(State);
 set_ram_duration_target(
   DurationTarget, State = #vqstate {
                     rates = #rates { in      = AvgIngressRate,
                                      out     = AvgEgressRate,
                                      ack_in  = AvgAckIngressRate,
                                      ack_out = AvgAckEgressRate },
-                    target_ram_count = TargetRamCount, mode = Mode }) ->
+                    target_ram_count = TargetRamCount }) ->
     Rate =
         AvgEgressRate + AvgIngressRate + AvgAckEgressRate + AvgAckIngressRate,
     TargetRamCount1 =
@@ -825,13 +830,10 @@ set_ram_duration_target(
             _         -> trunc(DurationTarget * Rate) %% msgs = sec * msgs/sec
         end,
     State1 = State #vqstate { target_ram_count = TargetRamCount1 },
-    io:format("set_ram_duration_target Mode ~p DurationTarget ~p TargetRamCount ~p TargetRamCount1 ~p~n",
-              [Mode, DurationTarget, TargetRamCount, TargetRamCount1]),
     TargetRamExprResult = TargetRamCount1 =:= infinity orelse (TargetRamCount =/= infinity andalso TargetRamCount1 >= TargetRamCount),
-    State2 = case {Mode, TargetRamExprResult} of
-                 {lazy, _} -> maybe_reduce_memory_use(State1);
-                 {_, true}  -> State1;
-                 {_, false} -> maybe_reduce_memory_use(State1)
+    State2 = case TargetRamExprResult of
+                 true  -> State1;
+                 false -> maybe_reduce_memory_use(State1)
              end,
     a(State2).
 
@@ -988,14 +990,17 @@ invoke(      _,   _, State) -> State.
 is_duplicate(_Msg, State) -> {false, State}.
 
 set_queue_mode(Mode, State = #vqstate { mode = Mode }) ->
+    % Note: since Mode matches Mode, queue mode has already been set
     State;
-%% TODO set_queue_mode(lazy, State0 = #vqstate { target_ram_count = TargetRamCount }) ->
 set_queue_mode(lazy, State0) ->
+    % Note: in this case, incoming mode is default, and we need to
+    % do what it takes to switch it to lazy
+    % TODO HACK this hard-codes target_ram_count to always be 0
     State1 = State0#vqstate { mode = lazy, target_ram_count = 0 },
     %% To become a lazy queue we need to page everything to disk first.
     State2 = convert_to_lazy(State1),
-    %% TODO restore the original target_ram_count
-    a(State2 #vqstate { mode = lazy, target_ram_count = 0 });
+    %% TODO ??? restore the original target_ram_count
+    a(State2);
 set_queue_mode(default, State) ->
     %% becoming a default queue means loading messages from disk like
     %% when a queue is recovered.
@@ -2392,17 +2397,18 @@ ifold(Fun, Acc, Its, State) ->
 %% Phase changes
 %%----------------------------------------------------------------------------
 
-maybe_reduce_memory_use(State = #vqstate {mode = lazy}) ->
-    io:format("maybe_reduce_memory_use lazy~n"),
+% TODO HACK this ignores the GC run threshold introduced in these GH issues:
+%% https://github.com/rabbitmq/rabbitmq-server/issues/964
+%% https://github.com/rabbitmq/rabbitmq-server/issues/973
+maybe_reduce_memory_use(State = #vqstate { mode = lazy }) ->
     State1 = reduce_memory_use(State),
-    State1#vqstate{memory_reduction_run_count =  0};
+    State1#vqstate{memory_reduction_run_count = 0};
 maybe_reduce_memory_use(State = #vqstate {memory_reduction_run_count = MRedRunCount,
                                           mode = Mode}) ->
-    io:format("maybe_reduce_memory_use OTHER~n"),
     case MRedRunCount >= ?EXPLICIT_GC_RUN_OP_THRESHOLD(Mode) of
         true -> State1 = reduce_memory_use(State),
-                State1#vqstate{memory_reduction_run_count =  0};
-        false -> State#vqstate{memory_reduction_run_count =  MRedRunCount + 1}
+                State1#vqstate{memory_reduction_run_count = 0};
+        false -> State#vqstate{memory_reduction_run_count = MRedRunCount + 1}
     end.
 
 reduce_memory_use(State = #vqstate { target_ram_count = infinity }) ->
