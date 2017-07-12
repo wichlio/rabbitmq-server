@@ -816,7 +816,7 @@ set_ram_duration_target(
                                      out     = AvgEgressRate,
                                      ack_in  = AvgAckIngressRate,
                                      ack_out = AvgAckEgressRate },
-                    target_ram_count = TargetRamCount }) ->
+                    target_ram_count = TargetRamCount, mode = Mode }) ->
     Rate =
         AvgEgressRate + AvgIngressRate + AvgAckEgressRate + AvgAckIngressRate,
     TargetRamCount1 =
@@ -825,12 +825,16 @@ set_ram_duration_target(
             _         -> trunc(DurationTarget * Rate) %% msgs = sec * msgs/sec
         end,
     State1 = State #vqstate { target_ram_count = TargetRamCount1 },
-    a(case TargetRamCount1 == infinity orelse
-          (TargetRamCount =/= infinity andalso
-           TargetRamCount1 >= TargetRamCount) of
-          true  -> State1;
-          false -> maybe_reduce_memory_use(State1)
-      end).
+    io:format("set_ram_duration_target Mode ~p DurationTarget ~p TargetRamCount ~p TargetRamCount1 ~p~n",
+              [Mode, DurationTarget, TargetRamCount, TargetRamCount1]),
+    TargetRamExprResult = TargetRamCount1 =:= infinity orelse (TargetRamCount =/= infinity andalso TargetRamCount1 >= TargetRamCount),
+    State2 = case {Mode, TargetRamExprResult} of
+                 {lazy, _} -> maybe_reduce_memory_use(State1);
+                 {_, true}  -> State1;
+                 {_, false} -> maybe_reduce_memory_use(State1)
+             end,
+    a(State2).
+
 
 maybe_update_rates(State = #vqstate{ in_counter  = InCount,
                                      out_counter = OutCount })
@@ -985,12 +989,13 @@ is_duplicate(_Msg, State) -> {false, State}.
 
 set_queue_mode(Mode, State = #vqstate { mode = Mode }) ->
     State;
-set_queue_mode(lazy, State = #vqstate {
-                                target_ram_count = TargetRamCount }) ->
+%% TODO set_queue_mode(lazy, State0 = #vqstate { target_ram_count = TargetRamCount }) ->
+set_queue_mode(lazy, State0) ->
+    State1 = State0#vqstate { mode = lazy, target_ram_count = 0 },
     %% To become a lazy queue we need to page everything to disk first.
-    State1 = convert_to_lazy(State),
-    %% restore the original target_ram_count
-    a(State1 #vqstate { mode = lazy, target_ram_count = TargetRamCount });
+    State2 = convert_to_lazy(State1),
+    %% TODO restore the original target_ram_count
+    a(State2 #vqstate { mode = lazy, target_ram_count = 0 });
 set_queue_mode(default, State) ->
     %% becoming a default queue means loading messages from disk like
     %% when a queue is recovered.
@@ -2387,10 +2392,15 @@ ifold(Fun, Acc, Its, State) ->
 %% Phase changes
 %%----------------------------------------------------------------------------
 
+maybe_reduce_memory_use(State = #vqstate {mode = lazy}) ->
+    io:format("maybe_reduce_memory_use lazy~n"),
+    State1 = reduce_memory_use(State),
+    State1#vqstate{memory_reduction_run_count =  0};
 maybe_reduce_memory_use(State = #vqstate {memory_reduction_run_count = MRedRunCount,
                                           mode = Mode}) ->
+    io:format("maybe_reduce_memory_use OTHER~n"),
     case MRedRunCount >= ?EXPLICIT_GC_RUN_OP_THRESHOLD(Mode) of
-	true -> State1 = reduce_memory_use(State),
+        true -> State1 = reduce_memory_use(State),
                 State1#vqstate{memory_reduction_run_count =  0};
         false -> State#vqstate{memory_reduction_run_count =  MRedRunCount + 1}
     end.
@@ -2459,8 +2469,7 @@ reduce_memory_use(State = #vqstate {
         end,
 
     State3 =
-        case chunk_size(?QUEUE:len(Q3),
-                        permitted_beta_count(State1)) of
+        case chunk_size(?QUEUE:len(Q3), permitted_beta_count(State1)) of
             0  ->
                 State1;
             S2 ->
@@ -2690,6 +2699,7 @@ push_betas_to_deltas(Quota, State = #vqstate { mode  = default,
 push_betas_to_deltas(Quota, State = #vqstate { mode  = lazy,
                                                delta = Delta,
                                                q3    = Q3}) ->
+    io:format("push_betas_to_deltas Quota ~p~n", [Quota]),
     PushState = {Quota, Delta, State},
     {Q3a, PushState1} = push_betas_to_deltas(
                           fun ?QUEUE:out_r/1,
